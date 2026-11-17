@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Athenet · cliente de prueba del chat</title>
+<!--
+    CLIENTE DE PRUEBA. No es el frontend de produccion: eso es web-athenet.
+    Existe para dos cosas: comprobar a mano el flujo completo
+    (Cognito -> ticket -> WebSocket) y servir de referencia para quien integre
+    el chat en el frontend de verdad.
+
+    Se tiene que servir en http://localhost:5173/ exactamente, por dos razones
+    independientes:
+      1. Es el unico origen en WS_ALLOWED_ORIGINS (si no, el handshake da 403).
+      2. Es la callback registrada en Cognito, que compara la URL EXACTA,
+         incluida la barra final. Por eso el archivo se llama index.html y se
+         sirve en la raiz: en /chat.html el redirect_uri ya no coincidiria.
+-->
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --border: #d9dce1; --text: #1a1d21;
+    --muted: #6b7280; --accent: #2563eb; --ok: #15803d; --bad: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15171a; --panel: #1d2024; --border: #32363c; --text: #e8eaed;
+      --muted: #9aa0a6; --accent: #60a5fa; --ok: #4ade80; --bad: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--border);
+           background: var(--panel); display: flex; gap: 14px; align-items: center;
+           flex-wrap: wrap; }
+  h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  .who { color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: 1fr 380px; gap: 16px; padding: 16px;
+         align-items: start; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border);
+          border-radius: 10px; overflow: hidden; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+             color: var(--muted); margin: 0; padding: 10px 14px;
+             border-bottom: 1px solid var(--border); font-weight: 650; }
+  #messages { height: 52vh; min-height: 260px; overflow-y: auto; padding: 12px 14px; }
+  .msg { margin-bottom: 10px; }
+  .msg .meta { font-size: 11px; color: var(--muted); }
+  .msg.mine .meta { color: var(--accent); }
+  .msg .body { white-space: pre-wrap; word-break: break-word; }
+  .msg.pending { opacity: .5; }
+  form.compose { display: flex; gap: 8px; padding: 12px 14px;
+                 border-top: 1px solid var(--border); }
+  input, select, button { font: inherit; padding: 8px 10px; border-radius: 7px;
+                          border: 1px solid var(--border); background: var(--bg);
+                          color: var(--text); }
+  input[type=text] { flex: 1; min-width: 0; }
+  button { cursor: pointer; background: var(--accent); color: #fff; border-color: transparent;
+           font-weight: 600; }
+  button.ghost { background: transparent; color: var(--text); border-color: var(--border);
+                 font-weight: 500; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #log { height: 52vh; min-height: 260px; overflow-y: auto; padding: 10px 14px;
+         font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  #log div { padding: 2px 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent); }
+  .t-ok { color: var(--ok); } .t-bad { color: var(--bad); } .t-dim { color: var(--muted); }
+  .probes { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .probes button { width: 100%; }
+  .note { padding: 0 14px 12px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Chat de Athenet · cliente de prueba</h1>
+  <span class="who" id="who">sin sesion</span>
+  <span style="flex:1"></span>
+  <select id="room">
+    <option value="GLOBAL">GLOBAL</option>
+    <option value="MATCH-1" selected>MATCH-1</option>
+    <option value="MATCH-2">MATCH-2</option>
+    <option value="COMPETITION-1">COMPETITION-1</option>
+  </select>
+  <button id="connect">Conectar</button>
+  <button id="login" class="ghost">Entrar con Cognito</button>
+  <button id="logout" class="ghost">Salir</button>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Sala</h2>
+    <div id="messages"></div>
+    <form class="compose" id="compose">
+      <input type="text" id="body" placeholder="Escribe un mensaje..." maxlength="500" autocomplete="off" disabled>
+      <button id="send" disabled>Enviar</button>
+    </form>
+  </section>
+
+  <aside style="display:grid; gap:16px">
+    <section class="card">
+      <h2>Traza del flujo</h2>
+      <div id="log"></div>
+    </section>
+
+    <section class="card">
+      <h2>Pruebas de seguridad</h2>
+      <div class="probes">
+        <button class="ghost" id="probe-room">Ticket de MATCH-1 → entrar a MATCH-2</button>
+        <button class="ghost" id="probe-reuse">Reusar el mismo ticket dos veces</button>
+        <button class="ghost" id="probe-noticket">Conectar sin ticket</button>
+        <button class="ghost" id="probe-flood">Enviar 7 mensajes de golpe</button>
+      </div>
+      <p class="note">
+        Ojo: el navegador <strong>no</strong> expone el codigo HTTP de un
+        handshake rechazado, solo dice que la conexion fallo. Para ver el 401 o
+        el 403 de verdad hay que mirar los logs del servicio o correr
+        <code>npm test</code>.
+      </p>
+    </section>
+  </aside>
+</main>
+
+<script type="module">
+/* ─────────────────────────────────────────────────────────────────────────────
+   Configuracion. Ninguno de estos valores es secreto: el client id de un
+   cliente publico y el id del pool son datos que el navegador expone de todas
+   formas. El secreto no existe a proposito: un SPA no puede guardar uno, y por
+   eso se usa PKCE.
+   ───────────────────────────────────────────────────────────────────────────── */
+const CONFIG = {
+  cognitoDomain: 'https://us-east-1hzriomt22.auth.us-east-1.amazoncognito.com',
+  clientId: '3gbm6r4i5822jglhl3pq34uash',
+  redirectUri: 'http://localhost:5173/',
+  scope: 'openid profile email',
+  chatApi: 'http://localhost:8086',
+  chatWs: 'ws://localhost:8086',
+};
+
+const $ = (id) => document.getElementById(id);
+const el = {
+  log: $('log'), messages: $('messages'), who: $('who'), room: $('room'),
+  body: $('body'), send: $('send'),
+};
+
+function log(text, kind = '') {
+  const line = document.createElement('div');
+  if (kind) line.className = `t-${kind}`;
+  line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
+  el.log.append(line);
+  el.log.scrollTop = el.log.scrollHeight;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   PKCE. El verifier es un secreto de un solo uso que vive en sessionStorage;
+   lo que viaja a Cognito es solo su SHA-256. Asi, aunque alguien intercepte el
+   "code" de la URL, no puede canjearlo sin el verifier.
+   ───────────────────────────────────────────────────────────────────────────── */
+function base64url(bytes) {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function randomUrlSafe(byteLength) {
+  return base64url(crypto.getRandomValues(new Uint8Array(byteLength)));
+}
+
+async function challengeOf(verifier) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return base64url(new Uint8Array(digest));
+}
+
+async function startLogin() {
+  const verifier = randomUrlSafe(32);
+  const state = randomUrlSafe(16);
+  sessionStorage.setItem('pkce_verifier', verifier);
+  sessionStorage.setItem('pkce_state', state);
+
+  const url = new URL(`${CONFIG.cognitoDomain}/oauth2/authorize`);
+  url.search = new URLSearchParams({
+    response_type: 'code',
+    client_id: CONFIG.clientId,
+    redirect_uri: CONFIG.redirectUri,
+    scope: CONFIG.scope,
+    state,
+    code_challenge_method: 'S256',
+    code_challenge: await challengeOf(verifier),
+  });
+
+  log('redirigiendo al Hosted UI de Cognito...', 'dim');
+  location.assign(url);
+}
+
+async function finishLoginIfReturning() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('code');
+
+  if (params.get('error')) {
+    log(`Cognito devolvio error: ${params.get('error_description') ?? params.get('error')}`, 'bad');
+  }
+  if (!code) return;
+
+  const expectedState = sessionStorage.getItem('pkce_state');
+  const verifier = sessionStorage.getItem('pkce_verifier');
+
+  // La URL se limpia SIEMPRE, incluso si algo falla: dejar el code puesto hace
+  // que un refresco intente canjear un codigo ya gastado y confunda el error.
+  history.replaceState({}, '', CONFIG.redirectUri);
+  sessionStorage.removeItem('pkce_state');
+  sessionStorage.removeItem('pkce_verifier');
+
+  // Defensa contra CSRF: el state que vuelve tiene que ser el que mandamos.
+  if (!expectedState || params.get('state') !== expectedState) {
+    return log('state no coincide: se descarta el codigo', 'bad');
+  }
+  if (!verifier) {
+    return log('no hay verifier en sessionStorage: se descarta el codigo', 'bad');
+  }
+
+  const response = await fetch(`${CONFIG.cognitoDomain}/oauth2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: CONFIG.clientId,
+      code,
+      redirect_uri: CONFIG.redirectUri,
+      code_verifier: verifier,
+    }),
+  });
+
+  if (!response.ok) {
+    return log(`el canje del codigo fallo: HTTP ${response.status} ${await response.text()}`, 'bad');
+  }
+
+  const tokens = await response.json();
+  // sessionStorage y no localStorage: el token muere al cerrar la pestana. Para
+  // una herramienta de prueba es lo correcto; el front real usa oidc-client-ts,
+  // que ademas renueva en silencio.
+  sessionStorage.setItem('access_token', tokens.access_token);
+  log('access_token obtenido', 'ok');
+  showSession();
+}
+
+function accessToken() {
+  return sessionStorage.getItem('access_token');
+}
+
+function showSession() {
+  const token = accessToken();
+  if (!token) {
+    el.who.textContent = 'sin sesion';
+    return;
+  }
+  // Se lee el payload SOLO para mostrar quien eres en pantalla. El servidor no
+  // confia en nada de esto: valida la firma por su cuenta.
+  const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+  const expiresIn = Math.max(0, payload.exp - Math.floor(Date.now() / 1000));
+  el.who.textContent = `sub ${payload.sub.slice(0, 8)}… · expira en ${Math.floor(expiresIn / 60)} min`;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Ticket + WebSocket
+   ───────────────────────────────────────────────────────────────────────────── */
+async function askTicket(target) {
+  const token = accessToken();
+  if (!token) throw new Error('no hay sesion: entra con Cognito primero');
+
+  const response = await fetch(`${CONFIG.chatApi}/api/ws/ticket`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target }),
+  });
+
+  const text = await response.text();
+  if (!response.ok) throw new Error(`ticket rechazado: HTTP ${response.status} ${text}`);
+
+  const { ticket, expiresIn } = JSON.parse(text);
+  log(`ticket para ${target} (vive ${expiresIn}s)`, 'ok');
+  return ticket;
+}
+
+let socket = null;
+
+function openSocket(ticket, roomId, { announce = true } = {}) {
+  if (socket) { socket.close(); socket = null; }
+
+  const url = `${CONFIG.chatWs}/ws/chat?ticket=${encodeURIComponent(ticket)}&roomId=${encodeURIComponent(roomId)}`;
+  log(`abriendo ws .../ws/chat?ticket=…&roomId=${roomId}`, 'dim');
+
+  const ws = new WebSocket(url);
+  socket = ws;
+
+  ws.addEventListener('open', () => log('socket abierto', 'ok'));
+
+  ws.addEventListener('close', (event) => {
+    if (announce) {
+      // code 1006 = cerrado sin handshake limpio, que es lo que se ve cuando el
+      // servidor rechazo el upgrade. El navegador no entrega el status HTTP.
+      const extra = event.code === 1006 ? ' (rechazado en el handshake: mira los logs del servicio)' : '';
+      log(`socket cerrado · code ${event.code}${extra}`, event.code === 1000 ? 'dim' : 'bad');
+    }
+    el.body.disabled = true;
+    el.send.disabled = true;
+  });
+
+  ws.addEventListener('error', () => log('error de socket', 'bad'));
+
+  ws.addEventListener('message', (event) => {
+    const frame = JSON.parse(event.data);
+
+    if (frame.type === 'chat.ready') {
+      log(`chat.ready · sala ${frame.roomId} · eres ${frame.you.displayName}`, 'ok');
+      ws.me = frame.you.sub;
+      el.body.disabled = false;
+      el.send.disabled = false;
+      el.body.focus();
+      return;
+    }
+    if (frame.type === 'chat.history') {
+      el.messages.replaceChildren();
+      log(`chat.history · ${frame.messages.length} mensaje(s)`, 'dim');
+      frame.messages.forEach((message) => render(message, ws.me));
+      return;
+    }
+    if (frame.type === 'chat.message') {
+      // Si el mensaje es el eco de uno propio, se reemplaza la burbuja optimista
+      // en vez de duplicarla.
+      const pending = frame.clientMessageId && document.getElementById(`pending-${frame.clientMessageId}`);
+      if (pending) pending.remove();
+      render(frame.data, ws.me);
+      return;
+    }
+    if (frame.type === 'error') {
+      log(`error del servidor · ${frame.status} · ${frame.message}`, 'bad');
+      return;
+    }
+    if (frame.type === 'pong') return;
+    log(`marco desconocido: ${event.data}`, 'bad');
+  });
+
+  return ws;
+}
+
+function render(message, mySub) {
+  const wrapper = document.createElement('div');
+  wrapper.className = `msg${message.authorSub === mySub ? ' mine' : ''}`;
+  const when = new Date(message.sentAt).toLocaleTimeString();
+  wrapper.innerHTML = `<div class="meta"></div><div class="body"></div>`;
+  wrapper.querySelector('.meta').textContent = `${message.authorDisplayName} · ${when}`;
+  wrapper.querySelector('.body').textContent = message.body;
+  el.messages.append(wrapper);
+  el.messages.scrollTop = el.messages.scrollHeight;
+  return wrapper;
+}
+
+async function connect() {
+  try {
+    const room = el.room.value;
+    const ticket = await askTicket(room);
+    openSocket(ticket, room);
+  } catch (error) {
+    log(error.message, 'bad');
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Pruebas de seguridad a un clic
+   ───────────────────────────────────────────────────────────────────────────── */
+async function probe(name, run) {
+  log(`── prueba: ${name}`, 'dim');
+  try { await run(); } catch (error) { log(error.message, 'bad'); }
+}
+
+$('probe-room').onclick = () => probe('ticket de MATCH-1 usado en MATCH-2 (se espera 403)', async () => {
+  const ticket = await askTicket('MATCH-1');
+  openSocket(ticket, 'MATCH-2');
+});
+
+$('probe-reuse').onclick = () => probe('reusar un ticket (el segundo debe fallar)', async () => {
+  const room = el.room.value;
+  const ticket = await askTicket(room);
+  const first = openSocket(ticket, room, { announce: false });
+  await new Promise((resolve) => first.addEventListener('open', resolve, { once: true }));
+  log('primer canje OK, intentando el segundo con el MISMO ticket...', 'dim');
+  openSocket(ticket, room);
+});
+
+$('probe-noticket').onclick = () => probe('conectar sin ticket (se espera 400)', async () => {
+  openSocket('', el.room.value);
+});
+
+$('probe-flood').onclick = () => probe('7 mensajes de golpe (el 6.o debe dar 429)', async () => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('conecta primero');
+  for (let i = 1; i <= 7; i += 1) {
+    socket.send(JSON.stringify({ type: 'chat.send', body: `inundacion ${i}` }));
+  }
+});
+
+/* ───────────────────────────────────────────────────────────────────────────── */
+$('login').onclick = startLogin;
+$('connect').onclick = connect;
+$('logout').onclick = () => {
+  sessionStorage.clear();
+  if (socket) socket.close(1000);
+  const url = new URL(`${CONFIG.cognitoDomain}/logout`);
+  url.search = new URLSearchParams({
+    client_id: CONFIG.clientId,
+    logout_uri: CONFIG.redirectUri,
+  });
+  location.assign(url);
+};
+
+$('compose').onsubmit = (event) => {
+  event.preventDefault();
+  const body = el.body.value.trim();
+  if (!body || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+  // Burbuja optimista: se pinta de inmediato y se confirma cuando vuelve el eco.
+  const clientMessageId = randomUrlSafe(8);
+  const bubble = render(
+    { authorSub: socket.me, authorDisplayName: 'tu (enviando…)', body, sentAt: new Date().toISOString() },
+    socket.me
+  );
+  bubble.id = `pending-${clientMessageId}`;
+  bubble.classList.add('pending');
+
+  socket.send(JSON.stringify({ type: 'chat.send', clientMessageId, body }));
+  el.body.value = '';
+};
+
+showSession();
+await finishLoginIfReturning();
+log('listo. Si no hay sesion, pulsa "Entrar con Cognito".', 'dim');
+</script>
+</body>
+</html>
