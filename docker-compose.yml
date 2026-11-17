@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: athenet-chat-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chat_db
+      POSTGRES_USER: chat_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-chat_local}
+    # 5436 porque 5432 (Instituciones) y 5435 (Social) ya estan tomados en local.
+    ports:
+      - "5436:5432"
+    volumes:
+      - chat-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chat_user -d chat_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  chat-db-data:

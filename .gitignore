@@ -1,0 +1,9 @@
+node_modules/
+
+# El .env real nunca se versiona: lleva la password de la base y los
+# identificadores del User Pool. Solo viaja el ejemplo con placeholders.
+.env
+.env.*
+!.env.example
+
+npm-debug.log*
