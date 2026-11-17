@@ -1,0 +1,10 @@
+.git
+.github
+.env
+.env.*
+node_modules
+test
+dev-client
+*.pem
+*.key
+README.md
