@@ -133,8 +133,14 @@ const CONFIG = {
   clientId: '3gbm6r4i5822jglhl3pq34uash',
   redirectUri: 'http://localhost:5173/',
   scope: 'openid profile email',
-  chatApi: 'http://localhost:8086',
-  chatWs: 'ws://localhost:8086',
+  /*
+      El REST va por el API Manager (HTTPS) y el WebSocket directo a la EC2.
+      No es una inconsistencia: API Gateway no hace de proxy de un upgrade a
+      WebSocket — su "WebSocket API" es otro producto, con otro modelo. Asi que
+      el ticket viaja por el gateway y el socket es un canal aparte.
+  */
+  chatApi: 'https://5hostjn4l8.execute-api.us-east-1.amazonaws.com',
+  chatWs: 'ws://32.202.93.234:8086',
 };
 
 const $ = (id) => document.getElementById(id);
