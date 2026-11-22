@@ -12,6 +12,10 @@ const jwks = createRemoteJWKSet(JWKS_URI, {
   cacheMaxAge: 600_000,
 });
 
+// GetUser vive en el mismo host que el issuer
+const COGNITO_API_URI = new URL('/', config.cognito.issuerUri).href;
+const ADMIN_SCOPE = 'aws.cognito.signin.user.admin';
+
 const USERINFO_TIMEOUT_MS = 5_000;
 
 export class UpstreamError extends Error {
@@ -59,6 +63,7 @@ export async function verifyAccessToken(token) {
   return {
     sub: payload.sub,
     groups: Array.isArray(payload['cognito:groups']) ? payload['cognito:groups'] : [],
+    scopes: typeof payload.scope === 'string' ? payload.scope.split(' ') : [],
   };
 }
 
@@ -99,34 +104,59 @@ function unauthorized(message) {
   };
 }
 
-// El access token no trae email ni nombre: hay que preguntarselos a Cognito.
-export async function fetchUserInfo(accessToken) {
+async function requestCognito(url, init, operation) {
   let response;
   try {
-    response = await fetch(config.cognito.userInfoUri, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(USERINFO_TIMEOUT_MS),
-    });
+    response = await fetch(url, { ...init, signal: AbortSignal.timeout(USERINFO_TIMEOUT_MS) });
   } catch (error) {
     throw new UpstreamError(`No se pudo contactar a Cognito: ${error.message}`);
   }
 
   if (!response.ok) {
-    throw new UpstreamError(`Cognito respondio ${response.status} en userInfo.`);
+    throw new UpstreamError(`Cognito respondio ${response.status} en ${operation}.`);
   }
 
-  let body;
   try {
-    body = await response.json();
+    return await response.json();
   } catch {
     throw new UpstreamError('Cognito devolvio una respuesta que no es JSON.');
   }
+}
 
-  // Tolerante con terceros: se ignora todo lo que Cognito agregue.
-  return {
-    sub: body.sub ?? null,
-    email: body.email ?? null,
-    givenName: body.given_name ?? null,
-    familyName: body.family_name ?? null,
-  };
+// Tolerante con terceros: se ignora todo lo que Cognito agregue.
+const toUserInfo = (attributes) => ({
+  sub: attributes.sub ?? null,
+  email: attributes.email ?? null,
+  givenName: attributes.given_name ?? null,
+  familyName: attributes.family_name ?? null,
+});
+
+// El access token no trae email ni nombre: hay que preguntarselos a Cognito.
+// Un login por SDK (Amplify SRP) trae el scope admin y no "openid", que es lo
+// que exige /oauth2/userInfo; ese token se consulta con GetUser. Un login por
+// Hosted UI (dev-client) trae "openid" y sigue yendo a userInfo.
+export async function fetchUserInfo(accessToken, scopes = []) {
+  if (scopes.includes(ADMIN_SCOPE)) {
+    const body = await requestCognito(
+      COGNITO_API_URI,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-amz-json-1.1',
+          'X-Amz-Target': 'AWSCognitoIdentityProviderService.GetUser',
+        },
+        body: JSON.stringify({ AccessToken: accessToken }),
+      },
+      'GetUser'
+    );
+    const attributes = Object.fromEntries((body.UserAttributes ?? []).map(({ Name, Value }) => [Name, Value]));
+    return toUserInfo(attributes);
+  }
+
+  const body = await requestCognito(
+    config.cognito.userInfoUri,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+    'userInfo'
+  );
+  return toUserInfo(body);
 }
