@@ -41,8 +41,8 @@ ticketRouter.post('/api/ws/ticket', requireAuth, async (req, res, next) => {
           'El campo "target" es obligatorio y debe ser GLOBAL, COMPETITION-<numero> o MATCH-<numero>.',
       });
     }
-
-    const userInfo = await fetchUserInfo(req.accessToken);
+    // traigame el scope :v
+    const userInfo = await fetchUserInfo(req.accessToken, req.auth.scopes);
     const displayName = buildDisplayName(userInfo);
 
     // Queda ATADO a esta sala: el handshake compara este target con el roomId

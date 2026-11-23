@@ -99,7 +99,7 @@ El navegador **no puede mandar cabeceras en el handshake de un WebSocket**, así
 El flujo es en dos tiempos: el cliente pide un ticket **por HTTP**, donde sí puede autenticarse, y lo canjea en la URL del WebSocket.
 
 1. **`POST /api/ws/ticket`** con `Authorization: Bearer <access token>`. Se valida la firma contra el JWKS de Cognito (cacheado en memoria) y tres claims más: `iss`, `client_id` —el access token de Cognito **no trae `aud`**— y `token_use=access`, sin el cual un **id token** del mismo pool pasaría la validación de firma.
-2. El `display_name` se resuelve contra `/oauth2/userInfo` **al emitir** el ticket, nunca al canjearlo: así el handshake no depende de que Cognito responda.
+2. El `display_name` se resuelve contra Cognito **al emitir** el ticket, nunca al canjearlo: así el handshake no depende de que Cognito responda. El camino lo decide el **scope** del token: un login por SDK (la web, Amplify SRP) trae `aws.cognito.signin.user.admin` y no `openid`, así que va a `GetUser`; un login por Hosted UI (el `dev-client`) trae `openid` y va a `/oauth2/userInfo`, que exige ese scope.
 3. El ticket se guarda **solo como SHA-256**. Quien lea la tabla no puede abrir conexiones con lo que ve.
 4. **El canje es un único `UPDATE` condicional.** Con un `SELECT` y después un `UPDATE`, dos canjes simultáneos leerían `redeemed_at IS NULL` antes de que ninguno escribiera y ambos abrirían conexión.
 
@@ -152,7 +152,7 @@ cp .env.example .env
 | `DB_PASSWORD` | `chat_local` | Solo la usa `docker-compose` para inicializar Postgres |
 | `COGNITO_ISSUER_URI` | **sin valor** | `https://cognito-idp.<region>.amazonaws.com/<userPoolId>` |
 | `COGNITO_CLIENT_ID` | **sin valor** | App Client; se compara contra el claim `client_id` |
-| `COGNITO_USERINFO_URI` | **sin valor** | `https://<dominio>.auth.<region>.amazoncognito.com/oauth2/userInfo` |
+| `COGNITO_USERINFO_URI` | **sin valor** | `https://<dominio>.auth.<region>.amazoncognito.com/oauth2/userInfo`. Solo para tokens de Hosted UI; los del SDK usan `GetUser` en el host del issuer |
 | `WS_ALLOWED_ORIGINS` | `http://localhost:5173` | Lista blanca, separada por comas. La comparten el handshake y el preflight de CORS |
 | `WS_TICKET_TTL_SECONDS` | `30` | Vida del ticket |
 
@@ -220,7 +220,7 @@ src/
 ├── config.js           # Lee y valida el entorno una vez, al arrancar
 ├── db.js               # El pool de pg; todas las consultas van con parámetros
 ├── auth/
-│   ├── cognito.js      # Valida el access token y consulta /oauth2/userInfo
+│   ├── cognito.js      # Valida el access token y resuelve el nombre (GetUser o userInfo según el scope)
 │   └── ticket.js       # Emite, canjea y purga los tickets de un solo uso
 ├── middleware/
 │   └── cors.js         # Responde el preflight del navegador
